@@ -1,7 +1,6 @@
 from itertools import product
 import math
 
-import numpy as np
 import pandas as pd
 
 from sklearn.model_selection import train_test_split
@@ -74,136 +73,47 @@ def _prepare_base_dataframe():
     return df
 
 
-def _build_feature_adder(train_df: pd.DataFrame):
-    train_df = train_df.copy()
-    train_df["price_per_m2"] = train_df["price"] / train_df["Size"]
-
-    loc_ppm2 = train_df.groupby("Location")["price_per_m2"].mean()
-    cls_ppm2 = train_df.groupby("Classification")["price_per_m2"].mean()
-    loccls_ppm2 = train_df.groupby(["Location", "Classification"])["price_per_m2"].mean()
-    broker_ppm2 = train_df.groupby("Broker")["price_per_m2"].mean()
-    global_ppm2 = train_df["price_per_m2"].mean()
-
-    loc_count = train_df.groupby("Location").size()
-    cls_count = train_df.groupby("Classification").size()
-    broker_count = train_df.groupby("Broker").size()
-
-    loccls_ppm2_dict = loccls_ppm2.to_dict()
-
-    def add_features(df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-
-        df["loc_ppm2"] = df["Location"].map(loc_ppm2).fillna(global_ppm2)
-        df["cls_ppm2"] = df["Classification"].map(cls_ppm2).fillna(global_ppm2)
-        df["broker_ppm2"] = df["Broker"].map(broker_ppm2).fillna(global_ppm2)
-        loccls_keys = pd.Series(
-            list(zip(df["Location"], df["Classification"])), index=df.index
-        )
-        df["loccls_ppm2"] = loccls_keys.map(loccls_ppm2_dict)
-        df["loccls_ppm2"] = df["loccls_ppm2"].fillna(df["loc_ppm2"])
-
-        df["baseline_loc_price"] = df["loc_ppm2"] * df["Size"]
-        df["baseline_cls_price"] = df["cls_ppm2"] * df["Size"]
-        df["baseline_broker_price"] = df["broker_ppm2"] * df["Size"]
-
-        df["log_size"] = np.log1p(df["Size"])
-        df["sqrt_size"] = np.sqrt(df["Size"])
-
-        df["has_road"] = (df["Roads"] > 0).astype(int)
-        df["roads_capped"] = np.minimum(df["Roads"], 3)
-
-        df["loc_count"] = df["Location"].map(loc_count).fillna(0)
-        df["class_count"] = df["Classification"].map(cls_count).fillna(0)
-        df["broker_count"] = df["Broker"].map(broker_count).fillna(0)
-        df["broker_count"] = df["broker_count"].clip(upper=200)
-
-        return df
-
-    return add_features
-
-
-def _fit_default_grouping(train_df: pd.DataFrame) -> dict:
-    thresholds = {"Location": 25, "Classification": 15, "Broker": 100}
-    keep_map = {}
-    for column, limit in thresholds.items():
-        counts = train_df[column].value_counts()
-        keep_values = counts.nlargest(limit).index
-        keep_map[column] = set(keep_values)
-    return keep_map
-
-
-def _apply_grouping_map(df: pd.DataFrame, keep_map: dict) -> pd.DataFrame:
+def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    for column, keep_values in keep_map.items():
-        df[column] = df[column].where(df[column].isin(keep_values), "Others")
-    return df
 
+    df["price_per_m2"] = df["price"] / df["Size"]
 
-def _prepare_train_test_features(df: pd.DataFrame):
-    train_df, test_df = train_test_split(
-        df,
-        test_size=0.2,
-        random_state=42,
+    df["Price_per_m2_per_Classification"] = (
+        df.groupby("Classification")["price_per_m2"].transform("mean")
     )
 
-    feature_adder = _build_feature_adder(train_df)
-    train_feat = feature_adder(train_df)
-    test_feat = feature_adder(test_df)
+    df["Price_per_m2_per_Location"] = (
+        df.groupby("Location")["price_per_m2"].transform("mean")
+    )
 
-    grouping_map = _fit_default_grouping(train_feat)
-    train_grouped = _apply_grouping_map(train_feat, grouping_map)
-    test_grouped = _apply_grouping_map(test_feat, grouping_map)
+    df["LocClass_avg_price_per_m2"] = (
+        df.groupby(["Location", "Classification"])["price_per_m2"].transform("mean")
+    )
 
-    feature_cols_categ = ["Location", "Classification", "Broker"]
-    feature_cols_num = [
-        "Size",
-        "Roads",
-        "loc_ppm2",
-        "cls_ppm2",
-        "broker_ppm2",
-        "loccls_ppm2",
-        "baseline_loc_price",
-        "baseline_cls_price",
-        "baseline_broker_price",
-        "log_size",
-        "sqrt_size",
-        "has_road",
-        "roads_capped",
-        "loc_count",
-        "class_count",
-        "broker_count",
-    ]
-
-    final_features = feature_cols_categ + feature_cols_num
-
-    X_train = train_grouped[final_features].copy()
-    y_train = train_grouped["price"].copy()
-    X_test = test_grouped[final_features].copy()
-    y_test = test_grouped["price"].copy()
-
-    return {
-        "X_train": X_train,
-        "X_test": X_test,
-        "y_train": y_train,
-        "y_test": y_test,
-        "train_table": train_grouped,
-        "test_table": test_grouped,
-        "feature_cols_categ": feature_cols_categ,
-        "final_features": final_features,
-    }
+    return df
 
 
 def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool = True):
     _, _, _, output_dir = get_project_paths()
 
-    prepared = _prepare_train_test_features(df)
+    feature_cols_categ = ["Location", "Classification", "Broker"]
+    feature_cols_num = [
+        "Size",
+        "Roads",
+        "Price_per_m2_per_Classification",
+        "Price_per_m2_per_Location",
+        "LocClass_avg_price_per_m2",
+    ]
 
-    X_train = prepared["X_train"]
-    X_test = prepared["X_test"]
-    y_train = prepared["y_train"]
-    y_test = prepared["y_test"]
-    feature_cols_categ = prepared["feature_cols_categ"]
-    final_features = prepared["final_features"]
+    X = df[feature_cols_categ + feature_cols_num].copy()
+    y = df["price"].copy()
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=42,
+    )
 
     if verbose:
         print(f"[INFO] Train rows: {len(X_train)}, Test rows: {len(X_test)}")
@@ -244,7 +154,7 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
 
     if save_outputs:
         output_dir.mkdir(parents=True, exist_ok=True)
-        pred_df = prepared["test_table"].copy()
+        pred_df = X_test.copy()
         pred_df["Actual Price (kBHD)"] = y_test.values.round(0).astype(int)
         pred_df["Predicted Price (kBHD)"] = y_pred.round(0).astype(int)
 
@@ -254,16 +164,16 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
             print(f"[INFO] Saved predictions to {out_file}")
 
         train_table_path = output_dir / "train_table.xlsx"
-        train_table_encoded = X_train_te.copy()
-        train_table_encoded["price"] = y_train.values
-        train_table_encoded.to_excel(train_table_path, index=False)
+        train_table = X_train_te.copy()
+        train_table["price"] = y_train.values
+        train_table.to_excel(train_table_path, index=False)
         if verbose:
             print(f"[INFO] Saved encoded training table to {train_table_path}")
 
         test_table_path = output_dir / "test_table.xlsx"
-        test_table_encoded = X_test_te.copy()
-        test_table_encoded["price"] = y_test.values
-        test_table_encoded.to_excel(test_table_path, index=False)
+        test_table = X_test_te.copy()
+        test_table["price"] = y_test.values
+        test_table.to_excel(test_table_path, index=False)
         if verbose:
             print(f"[INFO] Saved encoded testing table to {test_table_path}")
 
@@ -369,7 +279,8 @@ def auto_tune_trimming():
         if len(df_variant) != base_rows:
             raise RuntimeError("Auto tune grouping removed rows unexpectedly.")
 
-        metrics = _train_model(df_variant, save_outputs=False, verbose=False)
+        engineered_df = _engineer_features(df_variant)
+        metrics = _train_model(engineered_df, save_outputs=False, verbose=False)
 
         results.append({
             "broker": broker_opt,
@@ -448,4 +359,5 @@ def train_and_test():
     print_header("TEACH / TRAIN & TEST THE MODEL")
 
     base_df = _prepare_base_dataframe()
-    _train_model(base_df, save_outputs=True, verbose=True)
+    engineered_df = _engineer_features(base_df)
+    _train_model(engineered_df, save_outputs=True, verbose=True)
