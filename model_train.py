@@ -1,6 +1,5 @@
-import math
 from itertools import product
-from typing import Optional
+import math
 
 import pandas as pd
 
@@ -180,17 +179,11 @@ def _generate_trim_options(series: pd.Series):
     categories = list(counts.index)
     total_unique = len(categories)
     options = []
-    seen = {None}
+    seen = set()
 
-    # Always include a "no trim" option so the original cardinality is considered.
-    options.append({"keep": None, "total": total_unique})
-
-    max_threshold = min(30, total_unique)
-
-    for threshold in range(0, max_threshold + 1):
-        keep = tuple(categories[:threshold])
-
-        key = None if len(keep) == total_unique else tuple(sorted(keep))
+    for k in range(total_unique, -1, -1):
+        keep = tuple(categories[:k])
+        key = tuple(sorted(keep))
         if key in seen:
             continue
         seen.add(key)
@@ -202,9 +195,7 @@ def _generate_trim_options(series: pd.Series):
     return options
 
 
-def _apply_grouping(
-    df: pd.DataFrame, column: str, keep: Optional[tuple]
-) -> pd.DataFrame:
+def _apply_grouping(df: pd.DataFrame, column: str, keep: tuple) -> pd.DataFrame:
     if keep is None:
         return df
 
@@ -218,9 +209,7 @@ def _apply_grouping(
     return df
 
 
-def _describe_keep(keep, total: int) -> str:
-    if keep is None:
-        return "No trim"
+def _describe_keep(keep: tuple, total: int) -> str:
     if len(keep) == total:
         return f"All ({total})"
     if len(keep) == 0:
