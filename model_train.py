@@ -76,6 +76,15 @@ def _prepare_base_dataframe():
 def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
+    # Historical versions of the dataset included engineered road-access helpers
+    # such as ``has_road`` and ``roads_capped``.  The current modelling approach
+    # keeps the raw number of roads only, so make sure any legacy columns are
+    # dropped if they appear in the input data.
+    legacy_road_cols = ["has_road", "roads_capped"]
+    existing_legacy_cols = [col for col in legacy_road_cols if col in df.columns]
+    if existing_legacy_cols:
+        df = df.drop(columns=existing_legacy_cols)
+
     df["price_per_m2"] = df["price"] / df["Size"]
 
     df["Price_per_m2_per_Classification"] = (
@@ -88,6 +97,10 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["LocClass_avg_price_per_m2"] = (
         df.groupby(["Location", "Classification"])["price_per_m2"].transform("mean")
+    )
+
+    df["locclsbrk_ppm2"] = (
+        df.groupby(["Location", "Classification", "Broker"])["price_per_m2"].transform("mean")
     )
 
     return df
@@ -103,6 +116,7 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
         "Price_per_m2_per_Classification",
         "Price_per_m2_per_Location",
         "LocClass_avg_price_per_m2",
+        "locclsbrk_ppm2",
     ]
 
     X = df[feature_cols_categ + feature_cols_num].copy()
