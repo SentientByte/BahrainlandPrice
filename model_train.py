@@ -174,14 +174,28 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
     }
 
 
-def _generate_trim_options(series: pd.Series):
+def _generate_trim_options(series: pd.Series, *, max_thresholds: int = 25):
     counts = series.value_counts()
     categories = list(counts.index)
     total_unique = len(categories)
     options = []
     seen = set()
 
-    for k in range(total_unique, -1, -1):
+    candidate_sizes = list(range(total_unique, -1, -1))
+
+    if len(candidate_sizes) > max_thresholds:
+        # Sample at most ``max_thresholds`` values (including the extremes)
+        sampled_indices = set()
+        last_index = len(candidate_sizes) - 1
+        if max_thresholds == 1:
+            sampled_indices.add(0)
+        else:
+            for i in range(max_thresholds):
+                raw_idx = round(i * last_index / (max_thresholds - 1))
+                sampled_indices.add(raw_idx)
+        candidate_sizes = [candidate_sizes[idx] for idx in sorted(sampled_indices)]
+
+    for k in candidate_sizes:
         keep = tuple(categories[:k])
         key = tuple(sorted(keep))
         if key in seen:
@@ -233,13 +247,19 @@ def auto_tune_trimming():
 
     results = []
 
+    completed = 0
     for broker_opt, class_opt, loc_opt in product(
         trim_options["Broker"], trim_options["Classification"], trim_options["Location"]
     ):
         df_variant = base_df.copy()
+        base_rows = len(df_variant)
         df_variant = _apply_grouping(df_variant, "Broker", broker_opt["keep"])
         df_variant = _apply_grouping(df_variant, "Classification", class_opt["keep"])
         df_variant = _apply_grouping(df_variant, "Location", loc_opt["keep"])
+
+        # Sanity check: grouping should never remove rows.
+        if len(df_variant) != base_rows:
+            raise RuntimeError("Auto tune grouping removed rows unexpectedly.")
 
         engineered_df = _engineer_features(df_variant)
         metrics = _train_model(engineered_df, save_outputs=False, verbose=False)
@@ -252,21 +272,69 @@ def auto_tune_trimming():
             "rmse": metrics["rmse"],
         })
 
+        completed += 1
+        remaining = total_combinations - completed
+        print(
+            f"[PROGRESS] Simulations completed: {completed}/{total_combinations} "
+            f"({remaining} remaining)"
+        )
+
     results.sort(key=lambda item: (-item["r2"], item["rmse"]))
 
-    print("\nTop 10 trimming configurations (sorted by R² desc, RMSE asc):")
-    header = f"{'Rank':<6}{'Broker':<18}{'Classification':<20}{'Location':<18}{'R²':>10}{'RMSE':>14}"
-    print(header)
-    print("-" * len(header))
+    leaderboard_limit = 10
+    print(
+        f"\nTop {leaderboard_limit} trimming configurations (sorted by R² desc, RMSE asc):"
+    )
 
-    for idx, entry in enumerate(results[:10], start=1):
+    header_cols = [
+        ("Rank", 6),
+        ("Broker", 20),
+        ("Classification", 24),
+        ("Location", 20),
+        ("R²", 10),
+        ("RMSE", 14),
+    ]
+
+    def _render_row(rank_label, broker_label, class_label, loc_label, r2_value, rmse_value):
+        return (
+            f"| {rank_label:<{header_cols[0][1]-2}}"
+            f"| {broker_label:<{header_cols[1][1]-2}}"
+            f"| {class_label:<{header_cols[2][1]-2}}"
+            f"| {loc_label:<{header_cols[3][1]-2}}"
+            f"| {r2_value:>{header_cols[4][1]-2}}"
+            f"| {rmse_value:>{header_cols[5][1]-2}} |"
+        )
+
+    horizontal_rule = "+" + "+".join("-" * (width) for _, width in header_cols) + "+"
+
+    print(horizontal_rule)
+    header_row = (
+        f"| {'Rank':^{header_cols[0][1]-2}}"
+        f"| {'Broker':^{header_cols[1][1]-2}}"
+        f"| {'Classification':^{header_cols[2][1]-2}}"
+        f"| {'Location':^{header_cols[3][1]-2}}"
+        f"| {'R²':^{header_cols[4][1]-2}}"
+        f"| {'RMSE':^{header_cols[5][1]-2}} |"
+    )
+    print(header_row)
+    print(horizontal_rule)
+
+    for idx, entry in enumerate(results[:leaderboard_limit], start=1):
         broker_label = _describe_keep(entry["broker"]["keep"], entry["broker"]["total"])
         class_label = _describe_keep(entry["classification"]["keep"], entry["classification"]["total"])
         loc_label = _describe_keep(entry["location"]["keep"], entry["location"]["total"])
         print(
-            f"{idx:<6}{broker_label:<18}{class_label:<20}{loc_label:<18}"
-            f"{entry['r2']:>10.4f}{entry['rmse']:>14,.2f}"
+            _render_row(
+                idx,
+                broker_label,
+                class_label,
+                loc_label,
+                f"{entry['r2']:.4f}",
+                f"{entry['rmse']:,.2f}",
+            )
         )
+
+    print(horizontal_rule)
 
 
 def train_and_test():
