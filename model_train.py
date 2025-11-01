@@ -76,14 +76,18 @@ def _prepare_base_dataframe():
 def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    avg_size_by_class = df.groupby("Classification")["Size"].transform("mean")
-    df["Size_per_Classification"] = df["Size"] / (avg_size_by_class + 1e-6)
+    df["price_per_m2"] = df["price"] / df["Size"]
 
-    avg_size_by_loc = df.groupby("Location")["Size"].transform("mean")
-    df["Size_per_Location"] = df["Size"] / (avg_size_by_loc + 1e-6)
+    df["Price_per_m2_per_Classification"] = (
+        df.groupby("Classification")["price_per_m2"].transform("mean")
+    )
 
-    df["LocClass_avg_price"] = (
-        df.groupby(["Location", "Classification"])["price"].transform("mean")
+    df["Price_per_m2_per_Location"] = (
+        df.groupby("Location")["price_per_m2"].transform("mean")
+    )
+
+    df["LocClass_avg_price_per_m2"] = (
+        df.groupby(["Location", "Classification"])["price_per_m2"].transform("mean")
     )
 
     return df
@@ -96,9 +100,9 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
     feature_cols_num = [
         "Size",
         "Roads",
-        "Size_per_Classification",
-        "Size_per_Location",
-        "LocClass_avg_price",
+        "Price_per_m2_per_Classification",
+        "Price_per_m2_per_Location",
+        "LocClass_avg_price_per_m2",
     ]
 
     X = df[feature_cols_categ + feature_cols_num].copy()
@@ -158,6 +162,20 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
         pred_df.to_excel(out_file, index=False)
         if verbose:
             print(f"[INFO] Saved predictions to {out_file}")
+
+        train_table_path = output_dir / "train_table.xlsx"
+        train_table = X_train_te.copy()
+        train_table["price"] = y_train.values
+        train_table.to_excel(train_table_path, index=False)
+        if verbose:
+            print(f"[INFO] Saved encoded training table to {train_table_path}")
+
+        test_table_path = output_dir / "test_table.xlsx"
+        test_table = X_test_te.copy()
+        test_table["price"] = y_test.values
+        test_table.to_excel(test_table_path, index=False)
+        if verbose:
+            print(f"[INFO] Saved encoded testing table to {test_table_path}")
 
         fig_path = output_dir / "feature_importance.png"
         plt.figure(figsize=(10, 6))
