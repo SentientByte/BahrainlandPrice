@@ -10,105 +10,15 @@ from xgboost import XGBRegressor, plot_importance
 import matplotlib.pyplot as plt
 import category_encoders as ce
 
+from data_pipeline import engineer_features, prepare_base_dataframe
 from utils import get_project_paths, print_header
 
 
-def _load_training_df():
-    """
-    Try to load model_ready.xlsx from sensible locations.
-    Order:
-      1) /data/model_ready.xlsx
-      2) /output/model_ready.xlsx
-      3) /data/data.xlsx   <-- fallback
-    """
-    base_dir, venv_dir, data_dir, output_dir = get_project_paths()
-
-    # 1) the ideal location
-    p1 = data_dir / "model_ready.xlsx"
-    if p1.exists():
-        print(f"[INFO] Using training data from {p1}")
-        return pd.read_excel(p1)
-
-    # 2) sometimes cleaning scripts save it in /output
-    p2 = output_dir / "model_ready.xlsx"
-    if p2.exists():
-        print(f"[INFO] Using training data from {p2}")
-        return pd.read_excel(p2)
-
-    # 3) last resort: raw data.xlsx in /data
-    p3 = data_dir / "data.xlsx"
-    if p3.exists():
-        print(f"[WARN] model_ready.xlsx not found. Using {p3} instead.")
-        return pd.read_excel(p3)
-
-    # nothing found
-    raise FileNotFoundError(
-        f"model_ready.xlsx not found in {data_dir} or {output_dir}, and data.xlsx also missing."
-    )
-
-
-def _prepare_base_dataframe():
-    df = _load_training_df()
-
-    expected_cols = ["Location", "Size", "Classification", "Roads", "Broker", "price"]
-    missing = [c for c in expected_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns in training data: {missing}")
-
-    df = df[expected_cols].copy()
-    df = df.dropna(subset=expected_cols).copy()
-
-    df["Size"] = pd.to_numeric(df["Size"], errors="coerce")
-    df["Roads"] = pd.to_numeric(df["Roads"], errors="coerce")
-    df["price"] = pd.to_numeric(df["price"], errors="coerce")
-
-    df = df.dropna(subset=["Size", "Roads", "price"]).copy()
-
-    low_q, high_q = df["price"].quantile([0.01, 0.99])
-    before_rows = len(df)
-    df = df[(df["price"] >= low_q) & (df["price"] <= high_q)].copy()
-    after_rows = len(df)
-    print(f"[INFO] Outlier trimming (1% tails): {before_rows} -> {after_rows} rows kept")
-
-    return df
-
-
-def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    # Historical versions of the dataset included engineered road-access helpers
-    # such as ``has_road`` and ``roads_capped``.  The current modelling approach
-    # keeps the raw number of roads only, so make sure any legacy columns are
-    # dropped if they appear in the input data.
-    legacy_road_cols = ["has_road", "roads_capped"]
-    existing_legacy_cols = [col for col in legacy_road_cols if col in df.columns]
-    if existing_legacy_cols:
-        df = df.drop(columns=existing_legacy_cols)
-
-    df["price_per_m2"] = df["price"] / df["Size"]
-
-    df["Price_per_m2_per_Classification"] = (
-        df.groupby("Classification")["price_per_m2"].transform("mean")
-    )
-
-    df["Price_per_m2_per_Location"] = (
-        df.groupby("Location")["price_per_m2"].transform("mean")
-    )
-
-    df["LocClass_avg_price_per_m2"] = (
-        df.groupby(["Location", "Classification"])["price_per_m2"].transform("mean")
-    )
-
-    df["locclsbrk_ppm2"] = (
-        df.groupby(["Location", "Classification", "Broker"])["price_per_m2"].transform("mean")
-    )
-
-    return df
-
-
 def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool = True):
+    # STEP 1: Locate the output directory so trained artefacts can be persisted.
     _, _, _, output_dir = get_project_paths()
 
+    # STEP 2: Separate categorical and numerical predictors used by the model.
     feature_cols_categ = ["Location", "Classification", "Broker"]
     feature_cols_num = [
         "Size",
@@ -119,9 +29,11 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
         "locclsbrk_ppm2",
     ]
 
+    # STEP 3: Split the engineered dataframe into predictors and target.
     X = df[feature_cols_categ + feature_cols_num].copy()
     y = df["price"].copy()
 
+    # STEP 4: Create train/test splits to evaluate performance.
     X_train, X_test, y_train, y_test = train_test_split(
         X,
         y,
@@ -132,17 +44,20 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
     if verbose:
         print(f"[INFO] Train rows: {len(X_train)}, Test rows: {len(X_test)}")
 
+    # STEP 5: Target encode the categorical predictors using training targets.
     if verbose:
         print("[INFO] Applying target encoding on: Location, Classification, Broker ...")
     te = ce.TargetEncoder(cols=feature_cols_categ, smoothing=0.3)
     X_train_te = te.fit_transform(X_train, y_train)
     X_test_te = te.transform(X_test)
 
+    # STEP 6: Add an interaction feature capturing the synergy between encoded columns.
     X_train_te["Loc_x_Class"] = X_train_te["Location"] * X_train_te["Classification"]
     X_test_te["Loc_x_Class"] = X_test_te["Location"] * X_test_te["Classification"]
 
     final_features = list(X_train_te.columns)
 
+    # STEP 7: Instantiate the gradient boosting regressor with tuned hyperparameters.
     model = XGBRegressor(
         n_estimators=600,
         learning_rate=0.05,
@@ -152,12 +67,15 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
         random_state=42,
     )
 
+    # STEP 8: Fit the model on the encoded training data.
     if verbose:
         print("[INFO] Training model (kBHD target)...")
     model.fit(X_train_te[final_features], y_train)
 
+    # STEP 9: Generate predictions for the held-out test set.
     y_pred = model.predict(X_test_te[final_features])
 
+    # STEP 10: Compute standard regression metrics to measure performance.
     mse = mean_squared_error(y_test, y_pred)
     rmse = math.sqrt(mse)
     r2 = r2_score(y_test, y_pred)
@@ -166,6 +84,7 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
         print(f"[MODEL] R²:   {r2:.4f}")
         print(f"[MODEL] RMSE: {rmse:,.2f} kBHD")
 
+    # STEP 11: Optionally export predictions, encoded tables, and feature importance.
     if save_outputs:
         output_dir.mkdir(parents=True, exist_ok=True)
         pred_df = X_test.copy()
@@ -199,6 +118,7 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
         if verbose:
             print(f"[INFO] Saved feature importance plot to {fig_path}")
 
+    # STEP 12: Return the fitted model and its evaluation metrics to the caller.
     return {
         "model": model,
         "rmse": rmse,
@@ -264,13 +184,17 @@ def _describe_keep(keep: tuple, total: int) -> str:
 
 
 def auto_tune_trimming():
+    # STEP 1: Announce the beginning of the trimming grid-search process.
     print_header("AUTO TUNE TRIMMING")
 
-    base_df = _prepare_base_dataframe()
+    # STEP 2: Prepare the base dataframe that every simulation will start from.
+    base_df = prepare_base_dataframe()
 
+    # STEP 3: Build trimming option grids for each categorical column of interest.
     trim_targets = ["Broker", "Classification", "Location"]
     trim_options = {col: _generate_trim_options(base_df[col]) for col in trim_targets}
 
+    # STEP 4: Calculate how many total configurations will be tested.
     total_combinations = 1
     for col in trim_targets:
         total_combinations *= len(trim_options[col])
@@ -279,23 +203,28 @@ def auto_tune_trimming():
 
     results = []
 
+    # STEP 5: Iterate through every possible combination of trimming options.
     completed = 0
     for broker_opt, class_opt, loc_opt in product(
         trim_options["Broker"], trim_options["Classification"], trim_options["Location"]
     ):
         df_variant = base_df.copy()
         base_rows = len(df_variant)
+
+        # STEP 6: Apply the chosen grouping rules to the working dataframe.
         df_variant = _apply_grouping(df_variant, "Broker", broker_opt["keep"])
         df_variant = _apply_grouping(df_variant, "Classification", class_opt["keep"])
         df_variant = _apply_grouping(df_variant, "Location", loc_opt["keep"])
 
-        # Sanity check: grouping should never remove rows.
+        # STEP 7: Ensure the grouping logic does not accidentally drop rows.
         if len(df_variant) != base_rows:
             raise RuntimeError("Auto tune grouping removed rows unexpectedly.")
 
-        engineered_df = _engineer_features(df_variant)
+        # STEP 8: Engineer features and train a model for this configuration.
+        engineered_df = engineer_features(df_variant)
         metrics = _train_model(engineered_df, save_outputs=False, verbose=False)
 
+        # STEP 9: Record the trimming configuration alongside evaluation metrics.
         results.append({
             "broker": broker_opt,
             "classification": class_opt,
@@ -304,6 +233,7 @@ def auto_tune_trimming():
             "rmse": metrics["rmse"],
         })
 
+        # STEP 10: Emit a progress update for visibility.
         completed += 1
         remaining = total_combinations - completed
         print(
@@ -311,6 +241,7 @@ def auto_tune_trimming():
             f"({remaining} remaining)"
         )
 
+    # STEP 11: Order the results to surface the best-performing combinations.
     results.sort(key=lambda item: (-item["r2"], item["rmse"]))
 
     leaderboard_limit = 10
@@ -337,6 +268,7 @@ def auto_tune_trimming():
             f"| {rmse_value:>{header_cols[5][1]-2}} |"
         )
 
+    # STEP 12: Print a table displaying the leading configurations.
     horizontal_rule = "+" + "+".join("-" * (width) for _, width in header_cols) + "+"
 
     print(horizontal_rule)
@@ -370,8 +302,12 @@ def auto_tune_trimming():
 
 
 def train_and_test():
+    # STEP 1: Announce the primary training/testing routine.
     print_header("TEACH / TRAIN & TEST THE MODEL")
 
-    base_df = _prepare_base_dataframe()
-    engineered_df = _engineer_features(base_df)
+    # STEP 2: Prepare the cleaned dataset and engineer features for modelling.
+    base_df = prepare_base_dataframe()
+    engineered_df = engineer_features(base_df)
+
+    # STEP 3: Train the model and persist outputs for stakeholders.
     _train_model(engineered_df, save_outputs=True, verbose=True)
