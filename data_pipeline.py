@@ -1,12 +1,132 @@
 """Data preparation pipeline for the Bahrain land price model."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple
 
 import pandas as pd
 
 from utils import get_project_paths
+
+
+@dataclass
+class FeatureLookupTables:
+    """Container for aggregate price-per-m² lookups fitted on training data."""
+
+    classification: pd.Series
+    location: pd.Series
+    loc_class: pd.Series
+    loc_class_broker: pd.Series
+    global_mean: float
+
+    @classmethod
+    def from_training_frame(cls, df: pd.DataFrame) -> "FeatureLookupTables":
+        """Create lookup tables based solely on the provided training frame."""
+
+        working = df.copy()
+        working["price_per_m2"] = working["price"] / working["Size"]
+
+        classification = working.groupby("Classification")["price_per_m2"].mean()
+        location = working.groupby("Location")["price_per_m2"].mean()
+        loc_class = working.groupby(["Location", "Classification"])["price_per_m2"].mean()
+        loc_class_broker = working.groupby(
+            ["Location", "Classification", "Broker"]
+        )["price_per_m2"].mean()
+        global_mean = working["price_per_m2"].mean()
+
+        return cls(
+            classification=classification,
+            location=location,
+            loc_class=loc_class,
+            loc_class_broker=loc_class_broker,
+            global_mean=global_mean,
+        )
+
+    def apply_to_frame(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply the fitted lookup tables to a dataframe without refitting."""
+
+        enriched = df.copy()
+
+        if {"price", "Size"}.issubset(enriched.columns):
+            enriched["price_per_m2"] = enriched["price"] / enriched["Size"].replace(0, pd.NA)
+
+        enriched = enriched.merge(
+            self.classification.rename("Price_per_m2_per_Classification").reset_index(),
+            on="Classification",
+            how="left",
+        )
+
+        enriched = enriched.merge(
+            self.location.rename("Price_per_m2_per_Location").reset_index(),
+            on="Location",
+            how="left",
+        )
+
+        enriched = enriched.merge(
+            self.loc_class.rename("LocClass_avg_price_per_m2").reset_index(),
+            on=["Location", "Classification"],
+            how="left",
+        )
+
+        enriched = enriched.merge(
+            self.loc_class_broker.rename("locclsbrk_ppm2").reset_index(),
+            on=["Location", "Classification", "Broker"],
+            how="left",
+        )
+
+        class_vals = enriched["Price_per_m2_per_Classification"].fillna(self.global_mean)
+        loc_vals = enriched["Price_per_m2_per_Location"].fillna(self.global_mean)
+
+        loc_class_vals = (
+            enriched["LocClass_avg_price_per_m2"]
+            .fillna(class_vals)
+            .fillna(loc_vals)
+            .fillna(self.global_mean)
+        )
+
+        locclsbrk_vals = (
+            enriched["locclsbrk_ppm2"]
+            .fillna(loc_class_vals)
+            .fillna(class_vals)
+            .fillna(loc_vals)
+            .fillna(self.global_mean)
+        )
+
+        enriched["Price_per_m2_per_Classification"] = class_vals
+        enriched["Price_per_m2_per_Location"] = loc_vals
+        enriched["LocClass_avg_price_per_m2"] = loc_class_vals
+        enriched["locclsbrk_ppm2"] = locclsbrk_vals
+
+        return enriched
+
+    def save(self, directory: Path, *, export_excel: bool = False) -> None:
+        """Persist lookup tables for reuse during inference."""
+
+        directory.mkdir(parents=True, exist_ok=True)
+
+        classification_df = self.classification.rename(
+            "Price_per_m2_per_Classification"
+        ).reset_index()
+        location_df = self.location.rename("Price_per_m2_per_Location").reset_index()
+        loc_class_df = self.loc_class.rename("LocClass_avg_price_per_m2").reset_index()
+        locclsbrk_df = self.loc_class_broker.rename("locclsbrk_ppm2").reset_index()
+        global_df = pd.DataFrame({"global_price_per_m2_mean": [self.global_mean]})
+
+        classification_df.to_csv(directory / "classification.csv", index=False)
+        location_df.to_csv(directory / "location.csv", index=False)
+        loc_class_df.to_csv(directory / "location_classification.csv", index=False)
+        locclsbrk_df.to_csv(directory / "location_classification_broker.csv", index=False)
+        global_df.to_csv(directory / "global.csv", index=False)
+
+        if export_excel:
+            excel_path = directory / "feature_lookups.xlsx"
+            with pd.ExcelWriter(excel_path) as writer:
+                classification_df.to_excel(writer, sheet_name="classification", index=False)
+                location_df.to_excel(writer, sheet_name="location", index=False)
+                loc_class_df.to_excel(writer, sheet_name="loc_class", index=False)
+                locclsbrk_df.to_excel(writer, sheet_name="loc_class_broker", index=False)
+                global_df.to_excel(writer, sheet_name="global", index=False)
 
 
 def _resolve_training_paths() -> Tuple[Path, Path]:
@@ -85,40 +205,36 @@ def prepare_base_dataframe() -> pd.DataFrame:
     return df
 
 
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Create the engineered features required by the model."""
+def engineer_features(
+    df: pd.DataFrame,
+    *,
+    lookups: FeatureLookupTables | None = None,
+    return_lookups: bool = False,
+) -> Tuple[pd.DataFrame, FeatureLookupTables] | pd.DataFrame:
+    """Apply feature engineering using training-derived lookup tables.
 
-    # STEP 1: Start from a defensive copy to avoid mutating caller data.
+    When ``lookups`` is ``None`` the function will fit lookup tables on the
+    provided dataframe. To avoid data leakage, callers must request the fitted
+    tables via ``return_lookups=True`` so they can be re-used for validation or
+    inference splits.
+    """
+
     df = df.copy()
-
-    # STEP 2: Remove legacy columns that may still exist on older exports.
     legacy_road_cols = ["has_road", "roads_capped"]
     existing_legacy_cols = [col for col in legacy_road_cols if col in df.columns]
     if existing_legacy_cols:
         df = df.drop(columns=existing_legacy_cols)
 
-    # STEP 3: Compute price-per-square-metre to normalise target values.
-    df["price_per_m2"] = df["price"] / df["Size"]
+    if lookups is None:
+        if not return_lookups:
+            raise ValueError(
+                "Feature lookups were not provided. Call engineer_features with "
+                "return_lookups=True on the training split to obtain them."
+            )
+        lookups = FeatureLookupTables.from_training_frame(df)
 
-    # STEP 4: Aggregate average prices per classification to capture high-level trends.
-    df["Price_per_m2_per_Classification"] = (
-        df.groupby("Classification")["price_per_m2"].transform("mean")
-    )
+    enriched = lookups.apply_to_frame(df)
 
-    # STEP 5: Aggregate average prices per location to incorporate regional signals.
-    df["Price_per_m2_per_Location"] = (
-        df.groupby("Location")["price_per_m2"].transform("mean")
-    )
-
-    # STEP 6: Blend location and classification for a finer-grained average.
-    df["LocClass_avg_price_per_m2"] = (
-        df.groupby(["Location", "Classification"])["price_per_m2"].transform("mean")
-    )
-
-    # STEP 7: Extend the aggregation to also capture broker-specific behaviour.
-    df["locclsbrk_ppm2"] = (
-        df.groupby(["Location", "Classification", "Broker"])["price_per_m2"].transform("mean")
-    )
-
-    # STEP 8: Return the enriched dataframe ready for training.
-    return df
+    if return_lookups:
+        return enriched, lookups
+    return enriched

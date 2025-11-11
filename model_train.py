@@ -14,7 +14,13 @@ from data_pipeline import engineer_features, prepare_base_dataframe
 from utils import get_project_paths, print_header
 
 
-def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool = True):
+def _train_model(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    save_outputs: bool = False,
+    verbose: bool = True,
+):
     # STEP 1: Locate the output directory so trained artefacts can be persisted.
     _, _, _, output_dir = get_project_paths()
 
@@ -30,16 +36,10 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
     ]
 
     # STEP 3: Split the engineered dataframe into predictors and target.
-    X = df[feature_cols_categ + feature_cols_num].copy()
-    y = df["price"].copy()
-
-    # STEP 4: Create train/test splits to evaluate performance.
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.2,
-        random_state=42,
-    )
+    X_train = train_df[feature_cols_categ + feature_cols_num].copy()
+    y_train = train_df["price"].copy()
+    X_test = test_df[feature_cols_categ + feature_cols_num].copy()
+    y_test = test_df["price"].copy()
 
     if verbose:
         print(f"[INFO] Train rows: {len(X_train)}, Test rows: {len(X_test)}")
@@ -87,7 +87,7 @@ def _train_model(df: pd.DataFrame, *, save_outputs: bool = False, verbose: bool 
     # STEP 11: Optionally export predictions, encoded tables, and feature importance.
     if save_outputs:
         output_dir.mkdir(parents=True, exist_ok=True)
-        pred_df = X_test.copy()
+        pred_df = test_df[feature_cols_categ + feature_cols_num].copy()
         pred_df["Actual Price (kBHD)"] = y_test.values.round(0).astype(int)
         pred_df["Predicted Price (kBHD)"] = y_pred.round(0).astype(int)
 
@@ -220,9 +220,17 @@ def auto_tune_trimming():
         if len(df_variant) != base_rows:
             raise RuntimeError("Auto tune grouping removed rows unexpectedly.")
 
-        # STEP 8: Engineer features and train a model for this configuration.
-        engineered_df = engineer_features(df_variant)
-        metrics = _train_model(engineered_df, save_outputs=False, verbose=False)
+        # STEP 8: Split, engineer features (training-only fit), and train.
+        train_split, test_split = train_test_split(
+            df_variant, test_size=0.2, random_state=42, shuffle=True
+        )
+        train_engineered, lookups = engineer_features(
+            train_split, return_lookups=True
+        )
+        test_engineered = engineer_features(test_split, lookups=lookups)
+        metrics = _train_model(
+            train_engineered, test_engineered, save_outputs=False, verbose=False
+        )
 
         # STEP 9: Record the trimming configuration alongside evaluation metrics.
         results.append({
@@ -305,9 +313,20 @@ def train_and_test():
     # STEP 1: Announce the primary training/testing routine.
     print_header("TEACH / TRAIN & TEST THE MODEL")
 
-    # STEP 2: Prepare the cleaned dataset and engineer features for modelling.
+    # STEP 2: Prepare the cleaned dataset and split before feature engineering.
     base_df = prepare_base_dataframe()
-    engineered_df = engineer_features(base_df)
+    train_df, test_df = train_test_split(
+        base_df, test_size=0.2, random_state=42, shuffle=True
+    )
 
-    # STEP 3: Train the model and persist outputs for stakeholders.
-    _train_model(engineered_df, save_outputs=True, verbose=True)
+    # STEP 3: Fit feature lookups on the training data and apply them to both splits.
+    train_engineered, lookups = engineer_features(train_df, return_lookups=True)
+    test_engineered = engineer_features(test_df, lookups=lookups)
+
+    # STEP 4: Persist lookup tables for reuse by inference code and analysts.
+    _, _, _, output_dir = get_project_paths()
+    lookup_dir = output_dir / "feature_lookups"
+    lookups.save(lookup_dir, export_excel=True)
+
+    # STEP 5: Train the model and persist outputs for stakeholders.
+    _train_model(train_engineered, test_engineered, save_outputs=True, verbose=True)
