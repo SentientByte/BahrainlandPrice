@@ -70,7 +70,7 @@ def main_menu():
         print("2) Clean the data")
         print("3) Describe the data")
         print("4) Teach the model and test it")
-        print("5) Auto tune trimming")
+        print("5) Real world test")
         print("6) Exit")
         choice = input("Choose an option (1-6): ").strip()
 
@@ -83,7 +83,7 @@ def main_menu():
         elif choice == "4":
             teach_and_test_model()
         elif choice == "5":
-            model_train.auto_tune_trimming()
+            model_train.real_world_test()
         elif choice == "6":
             print("Bye.")
             break

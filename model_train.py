@@ -1,6 +1,7 @@
-from itertools import product
+import json
 import math
 
+import joblib
 import pandas as pd
 
 from sklearn.model_selection import train_test_split
@@ -10,8 +11,24 @@ from xgboost import XGBRegressor, plot_importance
 import matplotlib.pyplot as plt
 import category_encoders as ce
 
-from data_pipeline import engineer_features, prepare_base_dataframe
+from data_pipeline import FeatureLookupTables, engineer_features, prepare_base_dataframe
 from utils import get_project_paths, print_header
+
+
+FEATURE_COLS_CATEG = ["Location", "Classification", "Broker"]
+FEATURE_COLS_NUM = [
+    "Size",
+    "Roads",
+    "Price_per_m2_per_Classification",
+    "Price_per_m2_per_Location",
+    "LocClass_avg_price_per_m2",
+    "locclsbrk_ppm2",
+]
+
+MODEL_ARTIFACTS_DIRNAME = "model_artifacts"
+MODEL_FILENAME = "xgb_model.joblib"
+ENCODER_FILENAME = "target_encoder.joblib"
+FEATURE_LIST_FILENAME = "feature_columns.json"
 
 
 def _train_model(
@@ -25,20 +42,10 @@ def _train_model(
     _, _, _, output_dir = get_project_paths()
 
     # STEP 2: Separate categorical and numerical predictors used by the model.
-    feature_cols_categ = ["Location", "Classification", "Broker"]
-    feature_cols_num = [
-        "Size",
-        "Roads",
-        "Price_per_m2_per_Classification",
-        "Price_per_m2_per_Location",
-        "LocClass_avg_price_per_m2",
-        "locclsbrk_ppm2",
-    ]
-
     # STEP 3: Split the engineered dataframe into predictors and target.
-    X_train = train_df[feature_cols_categ + feature_cols_num].copy()
+    X_train = train_df[FEATURE_COLS_CATEG + FEATURE_COLS_NUM].copy()
     y_train = train_df["price"].copy()
-    X_test = test_df[feature_cols_categ + feature_cols_num].copy()
+    X_test = test_df[FEATURE_COLS_CATEG + FEATURE_COLS_NUM].copy()
     y_test = test_df["price"].copy()
 
     if verbose:
@@ -47,7 +54,7 @@ def _train_model(
     # STEP 5: Target encode the categorical predictors using training targets.
     if verbose:
         print("[INFO] Applying target encoding on: Location, Classification, Broker ...")
-    te = ce.TargetEncoder(cols=feature_cols_categ, smoothing=0.3)
+    te = ce.TargetEncoder(cols=FEATURE_COLS_CATEG, smoothing=0.3)
     X_train_te = te.fit_transform(X_train, y_train)
     X_test_te = te.transform(X_test)
 
@@ -55,7 +62,7 @@ def _train_model(
     X_train_te["Loc_x_Class"] = X_train_te["Location"] * X_train_te["Classification"]
     X_test_te["Loc_x_Class"] = X_test_te["Location"] * X_test_te["Classification"]
 
-    final_features = list(X_train_te.columns)
+    final_features = FEATURE_COLS_CATEG + FEATURE_COLS_NUM + ["Loc_x_Class"]
 
     # STEP 7: Instantiate the gradient boosting regressor with tuned hyperparameters.
     model = XGBRegressor(
@@ -87,7 +94,7 @@ def _train_model(
     # STEP 11: Optionally export predictions, encoded tables, and feature importance.
     if save_outputs:
         output_dir.mkdir(parents=True, exist_ok=True)
-        pred_df = test_df[feature_cols_categ + feature_cols_num].copy()
+        pred_df = test_df[FEATURE_COLS_CATEG + FEATURE_COLS_NUM].copy()
         pred_df["Actual Price (kBHD)"] = y_test.values.round(0).astype(int)
         pred_df["Predicted Price (kBHD)"] = y_pred.round(0).astype(int)
 
@@ -118,195 +125,26 @@ def _train_model(
         if verbose:
             print(f"[INFO] Saved feature importance plot to {fig_path}")
 
+        artifacts_dir = output_dir / MODEL_ARTIFACTS_DIRNAME
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        model_path = artifacts_dir / MODEL_FILENAME
+        encoder_path = artifacts_dir / ENCODER_FILENAME
+        feature_path = artifacts_dir / FEATURE_LIST_FILENAME
+
+        joblib.dump(model, model_path)
+        joblib.dump(te, encoder_path)
+        with feature_path.open("w", encoding="utf-8") as fh:
+            json.dump(final_features, fh)
+        if verbose:
+            print(f"[INFO] Saved model artefacts to {artifacts_dir}")
+
     # STEP 12: Return the fitted model and its evaluation metrics to the caller.
     return {
         "model": model,
         "rmse": rmse,
         "r2": r2,
     }
-
-
-def _generate_trim_options(series: pd.Series, *, max_thresholds: int = 25):
-    counts = series.value_counts()
-    categories = list(counts.index)
-    total_unique = len(categories)
-    options = []
-    seen = set()
-
-    candidate_sizes = list(range(total_unique, -1, -1))
-
-    if len(candidate_sizes) > max_thresholds:
-        # Sample at most ``max_thresholds`` values (including the extremes)
-        sampled_indices = set()
-        last_index = len(candidate_sizes) - 1
-        if max_thresholds == 1:
-            sampled_indices.add(0)
-        else:
-            for i in range(max_thresholds):
-                raw_idx = round(i * last_index / (max_thresholds - 1))
-                sampled_indices.add(raw_idx)
-        candidate_sizes = [candidate_sizes[idx] for idx in sorted(sampled_indices)]
-
-    for k in candidate_sizes:
-        keep = tuple(categories[:k])
-        key = tuple(sorted(keep))
-        if key in seen:
-            continue
-        seen.add(key)
-        options.append({
-            "keep": keep,
-            "total": total_unique,
-        })
-
-    return options
-
-
-def _apply_grouping(df: pd.DataFrame, column: str, keep: tuple) -> pd.DataFrame:
-    if keep is None:
-        return df
-
-    keep_set = set(keep)
-    if len(keep_set) == 0:
-        df[column] = "Others"
-    else:
-        if len(keep_set) == df[column].nunique():
-            return df
-        df[column] = df[column].where(df[column].isin(keep_set), "Others")
-    return df
-
-
-def _describe_keep(keep: tuple, total: int) -> str:
-    if len(keep) == total:
-        return f"All ({total})"
-    if len(keep) == 0:
-        return "All grouped"
-    return f"Top {len(keep)}"
-
-
-def auto_tune_trimming():
-    # STEP 1: Announce the beginning of the trimming grid-search process.
-    print_header("AUTO TUNE TRIMMING")
-
-    # STEP 2: Prepare the base dataframe that every simulation will start from.
-    base_df = prepare_base_dataframe()
-
-    # STEP 3: Build trimming option grids for each categorical column of interest.
-    trim_targets = ["Broker", "Classification", "Location"]
-    trim_options = {col: _generate_trim_options(base_df[col]) for col in trim_targets}
-
-    # STEP 4: Calculate how many total configurations will be tested.
-    total_combinations = 1
-    for col in trim_targets:
-        total_combinations *= len(trim_options[col])
-
-    print(f"[INFO] Evaluating {total_combinations} trimming configurations ...")
-
-    results = []
-
-    # STEP 5: Iterate through every possible combination of trimming options.
-    completed = 0
-    for broker_opt, class_opt, loc_opt in product(
-        trim_options["Broker"], trim_options["Classification"], trim_options["Location"]
-    ):
-        df_variant = base_df.copy()
-        base_rows = len(df_variant)
-
-        # STEP 6: Apply the chosen grouping rules to the working dataframe.
-        df_variant = _apply_grouping(df_variant, "Broker", broker_opt["keep"])
-        df_variant = _apply_grouping(df_variant, "Classification", class_opt["keep"])
-        df_variant = _apply_grouping(df_variant, "Location", loc_opt["keep"])
-
-        # STEP 7: Ensure the grouping logic does not accidentally drop rows.
-        if len(df_variant) != base_rows:
-            raise RuntimeError("Auto tune grouping removed rows unexpectedly.")
-
-        # STEP 8: Split, engineer features (training-only fit), and train.
-        train_split, test_split = train_test_split(
-            df_variant, test_size=0.2, random_state=42, shuffle=True
-        )
-        train_engineered, lookups = engineer_features(
-            train_split, return_lookups=True
-        )
-        test_engineered = engineer_features(test_split, lookups=lookups)
-        metrics = _train_model(
-            train_engineered, test_engineered, save_outputs=False, verbose=False
-        )
-
-        # STEP 9: Record the trimming configuration alongside evaluation metrics.
-        results.append({
-            "broker": broker_opt,
-            "classification": class_opt,
-            "location": loc_opt,
-            "r2": metrics["r2"],
-            "rmse": metrics["rmse"],
-        })
-
-        # STEP 10: Emit a progress update for visibility.
-        completed += 1
-        remaining = total_combinations - completed
-        print(
-            f"[PROGRESS] Simulations completed: {completed}/{total_combinations} "
-            f"({remaining} remaining)"
-        )
-
-    # STEP 11: Order the results to surface the best-performing combinations.
-    results.sort(key=lambda item: (-item["r2"], item["rmse"]))
-
-    leaderboard_limit = 10
-    print(
-        f"\nTop {leaderboard_limit} trimming configurations (sorted by R² desc, RMSE asc):"
-    )
-
-    header_cols = [
-        ("Rank", 6),
-        ("Broker", 20),
-        ("Classification", 24),
-        ("Location", 20),
-        ("R²", 10),
-        ("RMSE", 14),
-    ]
-
-    def _render_row(rank_label, broker_label, class_label, loc_label, r2_value, rmse_value):
-        return (
-            f"| {rank_label:<{header_cols[0][1]-2}}"
-            f"| {broker_label:<{header_cols[1][1]-2}}"
-            f"| {class_label:<{header_cols[2][1]-2}}"
-            f"| {loc_label:<{header_cols[3][1]-2}}"
-            f"| {r2_value:>{header_cols[4][1]-2}}"
-            f"| {rmse_value:>{header_cols[5][1]-2}} |"
-        )
-
-    # STEP 12: Print a table displaying the leading configurations.
-    horizontal_rule = "+" + "+".join("-" * (width) for _, width in header_cols) + "+"
-
-    print(horizontal_rule)
-    header_row = (
-        f"| {'Rank':^{header_cols[0][1]-2}}"
-        f"| {'Broker':^{header_cols[1][1]-2}}"
-        f"| {'Classification':^{header_cols[2][1]-2}}"
-        f"| {'Location':^{header_cols[3][1]-2}}"
-        f"| {'R²':^{header_cols[4][1]-2}}"
-        f"| {'RMSE':^{header_cols[5][1]-2}} |"
-    )
-    print(header_row)
-    print(horizontal_rule)
-
-    for idx, entry in enumerate(results[:leaderboard_limit], start=1):
-        broker_label = _describe_keep(entry["broker"]["keep"], entry["broker"]["total"])
-        class_label = _describe_keep(entry["classification"]["keep"], entry["classification"]["total"])
-        loc_label = _describe_keep(entry["location"]["keep"], entry["location"]["total"])
-        print(
-            _render_row(
-                idx,
-                broker_label,
-                class_label,
-                loc_label,
-                f"{entry['r2']:.4f}",
-                f"{entry['rmse']:,.2f}",
-            )
-        )
-
-    print(horizontal_rule)
 
 
 def train_and_test():
@@ -330,3 +168,91 @@ def train_and_test():
 
     # STEP 5: Train the model and persist outputs for stakeholders.
     _train_model(train_engineered, test_engineered, save_outputs=True, verbose=True)
+
+
+def real_world_test():
+    # STEP 1: Guide the user towards training the model if artefacts are missing.
+    print_header("REAL WORLD TEST")
+
+    _, _, _, output_dir = get_project_paths()
+
+    artifacts_dir = output_dir / MODEL_ARTIFACTS_DIRNAME
+    lookups_dir = output_dir / "feature_lookups"
+
+    model_path = artifacts_dir / MODEL_FILENAME
+    encoder_path = artifacts_dir / ENCODER_FILENAME
+    feature_path = artifacts_dir / FEATURE_LIST_FILENAME
+
+    missing_paths = [
+        path
+        for path in [artifacts_dir, lookups_dir, model_path, encoder_path, feature_path]
+        if not path.exists()
+    ]
+
+    if missing_paths:
+        print("[WARN] Trained model artefacts were not found. Please run option 4 first.")
+        for path in missing_paths:
+            print(f"       Missing: {path}")
+        return
+
+    lookups = FeatureLookupTables.load(lookups_dir)
+    model = joblib.load(model_path)
+    encoder = joblib.load(encoder_path)
+    with feature_path.open("r", encoding="utf-8") as fh:
+        final_features = json.load(fh)
+
+    print(
+        "Enter real-world plot details as: Location, Classification, Size, Roads, Broker"
+    )
+    print("Type 'q' to return to the menu.")
+
+    while True:
+        raw = input("Input: ").strip()
+        if raw.lower() in {"q", "quit", "exit", ""}:
+            break
+
+        parts = [part.strip() for part in raw.split(",")]
+        if len(parts) != 5:
+            print("[ERROR] Please provide exactly 5 values separated by commas.")
+            continue
+
+        location, classification, size_str, roads_str, broker = parts
+
+        try:
+            size = float(size_str)
+            roads = float(roads_str)
+        except ValueError:
+            print("[ERROR] Size and Roads must be numeric values.")
+            continue
+
+        input_df = pd.DataFrame(
+            [
+                {
+                    "Location": location,
+                    "Classification": classification,
+                    "Size": size,
+                    "Roads": roads,
+                    "Broker": broker,
+                }
+            ]
+        )
+
+        enriched = lookups.apply_to_frame(input_df)
+        features_df = enriched[FEATURE_COLS_CATEG + FEATURE_COLS_NUM].copy()
+        encoded_df = encoder.transform(features_df)
+
+        if not isinstance(encoded_df, pd.DataFrame):
+            encoded_df = pd.DataFrame(encoded_df, columns=features_df.columns)
+
+        encoded_df["Loc_x_Class"] = (
+            encoded_df["Location"] * encoded_df["Classification"]
+        )
+
+        for column in final_features:
+            if column not in encoded_df.columns:
+                encoded_df[column] = 0.0
+
+        encoded_df = encoded_df[final_features]
+
+        prediction = float(model.predict(encoded_df)[0])
+        print(f"[PREDICTION] Estimated price: {prediction:,.2f} k BHD")

@@ -128,6 +128,57 @@ class FeatureLookupTables:
                 locclsbrk_df.to_excel(writer, sheet_name="loc_class_broker", index=False)
                 global_df.to_excel(writer, sheet_name="global", index=False)
 
+    @classmethod
+    def load(cls, directory: Path) -> "FeatureLookupTables":
+        """Reconstruct lookup tables from the saved CSV artefacts."""
+
+        classification_path = directory / "classification.csv"
+        location_path = directory / "location.csv"
+        loc_class_path = directory / "location_classification.csv"
+        locclsbrk_path = directory / "location_classification_broker.csv"
+        global_path = directory / "global.csv"
+
+        required = [
+            classification_path,
+            location_path,
+            loc_class_path,
+            locclsbrk_path,
+            global_path,
+        ]
+
+        missing = [path for path in required if not path.exists()]
+        if missing:
+            missing_str = ", ".join(str(path) for path in missing)
+            raise FileNotFoundError(
+                f"Lookup table files are missing from {directory}: {missing_str}"
+            )
+
+        classification = (
+            pd.read_csv(classification_path)
+            .set_index("Classification")["Price_per_m2_per_Classification"]
+        )
+        location = (
+            pd.read_csv(location_path)
+            .set_index("Location")["Price_per_m2_per_Location"]
+        )
+        loc_class = (
+            pd.read_csv(loc_class_path)
+            .set_index(["Location", "Classification"])["LocClass_avg_price_per_m2"]
+        )
+        loc_class_broker = (
+            pd.read_csv(locclsbrk_path)
+            .set_index(["Location", "Classification", "Broker"])["locclsbrk_ppm2"]
+        )
+        global_mean = pd.read_csv(global_path)["global_price_per_m2_mean"].iloc[0]
+
+        return cls(
+            classification=classification,
+            location=location,
+            loc_class=loc_class,
+            loc_class_broker=loc_class_broker,
+            global_mean=global_mean,
+        )
+
 
 def _resolve_training_paths() -> Tuple[Path, Path]:
     """Return the data and output directories used to locate training data."""
