@@ -153,9 +153,7 @@ def train_and_test():
 
     # STEP 2: Prepare the cleaned dataset and split before feature engineering.
     base_df = prepare_base_dataframe()
-    train_df, test_df = train_test_split(
-        base_df, test_size=0.2, random_state=42, shuffle=True
-    )
+    train_df, test_df = train_test_split(base_df, test_size=0.2, shuffle=True)
 
     # STEP 3: Fit feature lookups on the training data and apply them to both splits.
     train_engineered, lookups = engineer_features(train_df, return_lookups=True)
