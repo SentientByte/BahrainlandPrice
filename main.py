@@ -94,4 +94,7 @@ def main_menu():
 if __name__ == "__main__":
     # make sure directories exist
     ensure_dirs()
+    _, venv_dir, _, _ = get_project_paths()
+    if not venv_dir.exists():
+        install_dependencies()
     main_menu()
