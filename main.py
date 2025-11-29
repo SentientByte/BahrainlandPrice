@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 import subprocess
 
+import model_train
+
 from utils import ensure_dirs, get_project_paths, print_header
 def install_dependencies():
     base_dir, venv_dir, data_dir, output_dir = get_project_paths()
@@ -57,8 +59,6 @@ def describe_data():
 
 def teach_and_test_model():
     print_header("TEACH / TRAIN & TEST THE MODEL")
-    import model_train
-
     model_train.train_and_test()
 
 
