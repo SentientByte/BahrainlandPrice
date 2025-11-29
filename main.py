@@ -62,6 +62,13 @@ def teach_and_test_model():
     model_train.train_and_test()
 
 
+def real_world_test():
+    print_header("REAL WORLD TEST")
+    import model_train
+
+    model_train.real_world_test()
+
+
 def main_menu():
     while True:
         print("\n==============================")
@@ -84,7 +91,7 @@ def main_menu():
         elif choice == "4":
             teach_and_test_model()
         elif choice == "5":
-            model_train.real_world_test()
+            real_world_test()
         elif choice == "6":
             print("Bye.")
             break
