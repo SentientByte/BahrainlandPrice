@@ -4,11 +4,6 @@ from pathlib import Path
 import subprocess
 
 from utils import ensure_dirs, get_project_paths, print_header
-import data_cleaning
-import data_describe
-import model_train
-
-
 def install_dependencies():
     base_dir, venv_dir, data_dir, output_dir = get_project_paths()
     print_header("INSTALL DEPENDENCIES")
@@ -48,16 +43,22 @@ def install_dependencies():
 
 def clean_data():
     print_header("CLEAN THE DATA")
+    import data_cleaning
+
     data_cleaning.clean_data_pipeline()
 
 
 def describe_data():
     print_header("DESCRIBE THE DATA")
+    import data_describe
+
     data_describe.describe_data()
 
 
 def teach_and_test_model():
     print_header("TEACH / TRAIN & TEST THE MODEL")
+    import model_train
+
     model_train.train_and_test()
 
 
