@@ -5,3 +5,4 @@ scikit-learn
 xgboost
 graphviz
 joblib
+category_encoders
