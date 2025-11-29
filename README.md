@@ -16,6 +16,5 @@ Run the provided shell launcher:
 ```
 
 The script prefers the project's `.venv` Python if available and otherwise uses
-`python3` from your system. If you haven't installed dependencies yet, choose
-option 1 in the menu to create `.venv` and install `requirements.txt` (including
-`category_encoders`).
+`python3` from your system. The application will prompt you to install
+requirements on the first run.
