@@ -64,6 +64,8 @@ def teach_and_test_model():
 
 def real_world_test():
     print_header("REAL WORLD TEST")
+    import model_train
+
     model_train.real_world_test()
 
 
